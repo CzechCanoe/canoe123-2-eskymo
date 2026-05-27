@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Generované výstupy skriptu
+*_z_xml.ods
+*_z_xml_*.ods
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/settings.local.json
+
+# LibreOffice / OpenOffice lockfiles + záložní soubory
+.~lock.*#
+*.bak

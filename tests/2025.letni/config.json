@@ -1,0 +1,116 @@
+{
+  "name": "Letní slalomy 2025",
+  "description": "BHZ 101/102 v ČB — sobota + neděle, plný rozsah kategorií",
+  "runs": [
+    {
+      "id": "101",
+      "args": {
+        "day": "26",
+        "race": 101,
+        "date": "26.07.25"
+      },
+      "manual_reference": "manual_reference/101.ods",
+      "known_differences": [
+        {
+          "sheet": "c1z_sl",
+          "type": "only_in_script",
+          "key": 14,
+          "note": "HRONOVÁ Šárka (RGC 14087) — má v XML Results, ručně byla zapomenuta."
+        },
+        {
+          "sheet": "c1z",
+          "type": "only_in_script",
+          "key": 14
+        },
+        {
+          "sheet": "c1m",
+          "type": "value_diff",
+          "key": 51,
+          "field": "time1",
+          "script": "DNF",
+          "manual": "DNS",
+          "note": "XML říká DNF, user zapsala DNS — chyba v ručním souboru."
+        },
+        {
+          "sheet": "k1m",
+          "type": "value_diff",
+          "key": 87,
+          "field": "time2",
+          "script": "DNS",
+          "manual": "DSQ",
+          "note": "XML BR2 říká DNS (BR1 byla DSQ); user zapsala DSQ i pro BR2."
+        },
+        {
+          "sheet": "k1m_sl",
+          "type": "value_diff",
+          "key": 108,
+          "field": "rgc",
+          "script": "23121",
+          "manual": "23116",
+          "note": "Canoe123 má v <Id>23116</Id> ale <ICFId>23121</ICFId>; ICFId je správný (ČERNÝ Vojtěch). User použila Id."
+        },
+        {
+          "sheet": "c2m_sl",
+          "type": "value_diff",
+          "key": 10,
+          "field": "rgc",
+          "script": "A9005 A9004",
+          "manual": "A9004 A9005",
+          "note": "Cizí dvojice POSPI+PECEK; XML pořadí (POSPI první) vs user (PECEK první) — kosmetické."
+        },
+        {
+          "sheet": "c2z_sl",
+          "type": "value_diff",
+          "key": 44,
+          "field": "rgc",
+          "note": "XML má 'Söhnall Linda', cizi měla 'Söhnall Linde' — překlep. Script doplnil Lindu jako nový A* záznam."
+        }
+      ]
+    },
+    {
+      "id": "102",
+      "args": {
+        "day": "27",
+        "race": 102,
+        "date": "27.07.25"
+      },
+      "manual_reference": "manual_reference/102.ods",
+      "known_differences": [
+        {
+          "sheet": "c1m_sl",
+          "type": "value_diff",
+          "key": 51,
+          "field": "rgc",
+          "script": "14043",
+          "manual": "14023",
+          "note": "XML říká ADAMEC Jáchym (14043), user napsala 14023 (Hron Robin) — chyba v ručním souboru."
+        },
+        {
+          "sheet": "c1z_sl",
+          "type": "value_diff",
+          "key": 14,
+          "field": "rgc",
+          "script": "14087",
+          "manual": "14012",
+          "note": "XML říká HRONOVÁ Šárka (ICFId 14087), user napsala 14012 (Vybulková) — chyba."
+        },
+        {
+          "sheet": "c2m_sl",
+          "type": "value_diff",
+          "key": 10,
+          "field": "rgc",
+          "note": "POSPI/PECEK pořadí stejně jako 101."
+        },
+        {
+          "sheet": "c2m_sl",
+          "type": "value_diff",
+          "key": 11,
+          "field": "rgc",
+          "script": "43215 59055",
+          "manual": "43215 9159",
+          "note": "Druhý paddler je MRŮZEK Šimon (59055), user napsala 9159 (Král Vít) — chyba."
+        }
+      ]
+    }
+  ]
+}

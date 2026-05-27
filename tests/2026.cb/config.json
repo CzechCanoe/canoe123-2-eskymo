@@ -1,0 +1,47 @@
+{
+  "name": "ČPŽ ČB 2026",
+  "description": "3. a 4. Český pohár žáků ve slalomu, České Budějovice",
+  "runs": [
+    {
+      "id": "49",
+      "args": {
+        "day": "23",
+        "race": 49,
+        "date": "23.05.26",
+        "name": "3. ČPŽ"
+      },
+      "manual_reference": "manual_reference/49_VL.ods"
+    },
+    {
+      "id": "51",
+      "args": {
+        "day": "24",
+        "race": 51,
+        "date": "24.05.26",
+        "name": "4. ČPŽ"
+      },
+      "manual_reference": "manual_reference/51_VL.ods",
+      "known_differences": [
+        {
+          "sheet": "k1m_sl",
+          "type": "only_in_script",
+          "key": 95,
+          "note": "PEŠKA (RGC 57163) má v XML Results obě DNS, takže striktně patří do výstupu. V ručním souboru chybí."
+        },
+        {
+          "sheet": "k1m",
+          "type": "only_in_script",
+          "key": 95,
+          "note": "PEŠKA (RGC 57163) má v XML Results obě DNS."
+        },
+        {
+          "sheet": "k1m",
+          "type": "value_diff",
+          "key": 65,
+          "field": "pen1",
+          "note": "XML pro ČERNÝ Ondřej K1M_BR1_24 nemá <Pen> element (Time=Total), script zapisuje pen=0, user nechala prázdné. Funkčně totéž."
+        }
+      ]
+    }
+  ]
+}

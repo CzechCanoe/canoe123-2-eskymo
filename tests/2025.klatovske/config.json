@@ -1,0 +1,35 @@
+{
+  "name": "Klatovské slalomy 2025",
+  "description": "BHZ 141/142 ve Strakonicích — sobota + neděle, včetně PZ, C2*",
+  "runs": [
+    {
+      "id": "141_so",
+      "args": {
+        "day": "4",
+        "race": 141,
+        "date": "04.10.25"
+      },
+      "manual_reference": "manual_reference/KT SO 141.ods",
+      "known_differences": [
+        {
+          "sheet": "c2m",
+          "type": "value_diff",
+          "key": 71,
+          "field": "time1",
+          "script": "DNS",
+          "manual": "dns",
+          "note": "Case-only rozdíl; user napsala malými, skript píše velkými."
+        }
+      ]
+    },
+    {
+      "id": "142_ne",
+      "args": {
+        "day": "5",
+        "race": 142,
+        "date": "05.10.25"
+      },
+      "manual_reference": "manual_reference/KT NE 142.ods"
+    }
+  ]
+}

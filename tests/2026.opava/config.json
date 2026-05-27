@@ -1,0 +1,26 @@
+{
+  "name": "ČPŽ Opava 2026",
+  "description": "BHZ 31/32 v Opavě — sobota + neděle, jen C1/K1 (žádné deble ani PZ)",
+  "runs": [
+    {
+      "id": "31_so",
+      "args": {
+        "day": "25",
+        "race": 31,
+        "date": "25.04.26",
+        "name": "1. Český pohár žáků ve slalomu v Opavě"
+      },
+      "manual_reference": "manual_reference/31-so.ods"
+    },
+    {
+      "id": "32_ne",
+      "args": {
+        "day": "26",
+        "race": 32,
+        "date": "26.04.26",
+        "name": "2. Český pohár žáků ve slalomu v Opavě"
+      },
+      "manual_reference": "manual_reference/32-ne.ods"
+    }
+  ]
+}
