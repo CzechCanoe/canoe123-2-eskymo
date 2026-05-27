@@ -1,6 +1,6 @@
-# canoe2eskymo
+# canoe123-2-eskymo
 
-> Convert race results from Canoe123 XML into Eskymo ODS templates.
+> Převod výsledků slalomu z Canoe123 XML do Eskymo ODS šablony.
 
 [![Tests](https://github.com/CzechCanoe/canoe123-2-eskymo/actions/workflows/test.yml/badge.svg)](https://github.com/CzechCanoe/canoe123-2-eskymo/actions/workflows/test.yml)
 
