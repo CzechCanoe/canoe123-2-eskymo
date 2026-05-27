@@ -40,10 +40,23 @@ import sys
 from collections import defaultdict
 from xml.etree import ElementTree as ET
 
-from odf.opendocument import load
+from odf.opendocument import load, OpenDocument
 from odf.table import Table, TableRow, TableCell
 from odf.text import P
 from odf import teletype
+
+
+# Monkey-patch: odfpy `remove_from_caches` občas spadne s ValueError ("x not in list")
+# u dokumentů, kde load() neregistruje úplně všechny elementy do element_dict.
+# Naše use case (odstranění buněk při _split_repeated_cells_until) tu chybu trigeruje
+# bez reálného problému — element prostě v cache nebyl, tak ho stačí ignorovat.
+_orig_remove_from_caches = OpenDocument.remove_from_caches
+def _safe_remove_from_caches(self, elt):
+    try:
+        _orig_remove_from_caches(self, elt)
+    except ValueError:
+        pass
+OpenDocument.remove_from_caches = _safe_remove_from_caches
 
 
 XML_NS = "{http://siwidata.com/Canoe123/Data.xsd}"
@@ -60,6 +73,9 @@ COL_VK = 1        # věk. kat.
 COL_JUN = 2       # 'jun.' marker
 COL_BIB = 3       # stč (bib v dané fázi)
 COL_RGC = 4       # rgc / ICFId
+COL_NAME = 5      # jméno (FamilyName + GivenName)
+COL_YEAR = 6      # rok narození
+COL_CLUB = 8      # oddíl (klub)
 COL_TIME_Q = 11   # čas v kvalifikaci (Q sheet) nebo XT čas pro ne-finalisty v F sheet
 COL_FINAL_RANK = 13  # finále rank (XER)
 
@@ -336,6 +352,18 @@ def build_junior_icf_set(participants: dict, cls: str) -> set:
     return {p["icf"] for p in participants[junior_cls] if p["icf"]}
 
 
+def _participant_info(p: dict) -> dict:
+    """Společné info ze XML <Participants> — zapisuje se do jméno/nar./oddíl."""
+    return {
+        "icf": p["icf"],
+        "family": p["family"],
+        "given": p["given"],
+        "name": f"{p['family']} {p['given']}".strip(),
+        "year": p["year"],
+        "club": p["club"],
+    }
+
+
 def collect_xt_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = ""):
     """Pro Q sheet — XT (Individual Time Trial) results."""
     suffix = f"_{attr}" if attr else ""
@@ -346,7 +374,7 @@ def collect_xt_data(participants: list[dict], results: dict, class_id: str, day:
         if not r:
             continue
         rows.append({
-            "icf": p["icf"],
+            **_participant_info(p),
             "bib_xt": r.get("bib_int"),
             "time_ms": r.get("time_ms"),
             "pen": r.get("pen") or 0,
@@ -373,7 +401,7 @@ def collect_xer_data(participants: list[dict], results: dict, class_id: str, day
         if not r:
             continue
         rows.append({
-            "icf": p["icf"],
+            **_participant_info(p),
             "bib_raw": r.get("bib_raw"),
             "bib_int": r.get("bib_int"),
             "time_ms": r.get("time_ms"),
@@ -436,8 +464,23 @@ def _set_final_rank(row: TableRow, rank: int) -> None:
 
 def _clear_data_row(row: TableRow) -> None:
     """Vyčistí data v řádku — pro 'leftover' řádky šablony."""
-    for col in (COL_POR, COL_VK, COL_JUN, COL_BIB, COL_RGC, COL_TIME_Q, COL_FINAL_RANK):
+    for col in (COL_POR, COL_VK, COL_JUN, COL_BIB, COL_RGC, COL_NAME, COL_YEAR,
+                COL_CLUB, COL_TIME_Q, COL_FINAL_RANK):
         clear_cell(get_cell_at(row, col))
+
+
+def _set_person_info(row: TableRow, info: dict) -> None:
+    """Zapíše jméno, rok narození a oddíl. Cross šablona nemá `reg` sheet,
+    takže tyhle hodnoty se musí zapsat přímo (ne přes formuli)."""
+    if info.get("name"):
+        set_cell_string(get_cell_at(row, COL_NAME), info["name"])
+    if info.get("year"):
+        try:
+            set_cell_float(get_cell_at(row, COL_YEAR), int(info["year"]))
+        except (ValueError, TypeError):
+            set_cell_string(get_cell_at(row, COL_YEAR), str(info["year"]))
+    if info.get("club"):
+        set_cell_string(get_cell_at(row, COL_CLUB), info["club"])
 
 
 def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set) -> int:
@@ -463,6 +506,7 @@ def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set) -> int:
         _set_jun_marker(row, x["icf"] in junior_icfs)
         _set_bib(row, bib_int=x["bib_xt"])
         _set_rgc(row, x["icf"])
+        _set_person_info(row, x)
         _set_time(row, x)
         row_idx += 1
     for x in dns_rows:
@@ -474,6 +518,7 @@ def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set) -> int:
         _set_jun_marker(row, x["icf"] in junior_icfs)
         _set_bib(row, bib_int=x["bib_xt"])
         _set_rgc(row, x["icf"])
+        _set_person_info(row, x)
         _set_time(row, x)
         row_idx += 1
 
@@ -521,6 +566,7 @@ def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set) -> int:
             elif x["time_ms"]:
                 set_cell_float(get_cell_at(row, COL_TIME_Q), x["time_ms"] / 1000.0)
         _set_rgc(row, x["icf"])
+        _set_person_info(row, x)
         row_idx += 1
 
     for j in range(row_idx, len(rows)):

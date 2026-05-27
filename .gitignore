@@ -11,6 +11,7 @@ env/
 # Generované výstupy skriptu
 *_z_xml.ods
 *_z_xml_*.ods
+*_vysledek.ods
 
 # Editor / IDE
 .vscode/
