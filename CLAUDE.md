@@ -161,6 +161,24 @@ Detaily v [`tests/README.md`](tests/README.md).
    + Junior MX1J/WX1J s 'jun.' markerem v MX1-F. Test pro `cross.py`.
    `config.json` má `"kind": "cross"`.
 
+## Cross sprint — XER = eliminační event result
+
+Canoe123 cross sprint má 4 race ID disciplíny: XT (Time Trial), XS
+(Semifinal), XF (Final), XER (Event Result). **XER je golden source**
+— Canoe123 do něj sám vše agreguje:
+
+- `<Bib>` v XER:
+  - **číslo** (např. "3") = byl v pavoukovi, je to XS bib
+  - **"t N"** (např. "t    3") = nebyl v pavoukovi, je to XT bib s prefixem
+- `<Rnk>` v XER = celkové pořadí
+- `<Time>` v XER (pro ne-pavoukové) = XT čas
+- `<Status>` v XER = DNS/DNF/DSQ pokud platí
+- `<RecordType>` v XER má víc úrovní (F/SF/QF/T podle hloubky pavouka)
+  — **nepoužívej**, místo toho detekuj pavouka přes formát `Bib`.
+
+Skript `cross.py` proto pro F sheet čte JEN XER. XT používá jen pro
+Q sheet (kvalifikační listina).
+
 ## Časté úkoly
 
 ### Přidání nové třídy (např. `MIX`, `XCM`, …)
