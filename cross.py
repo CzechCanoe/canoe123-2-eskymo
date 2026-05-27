@@ -79,6 +79,8 @@ COL_CLUB = 8      # oddíl (klub)
 COL_TIME_Q = 11   # čas v kvalifikaci (Q sheet) nebo XT čas pro ne-finalisty v F sheet
 COL_FLT = 12      # 'FLT(7)' marker pro failed gate
 COL_FINAL_RANK = 13  # finále rank (XER)
+COL_BODY = 16     # body (bodový součet podle ranku, statická tabulka v šabloně)
+COL_BODY_JUN = 17 # body jun. (pro juniorské pořadí v dospělé třídě)
 
 
 # -------- XML parsing --------
@@ -169,20 +171,6 @@ def _normalize_ws(s: str) -> str:
 def _is_cross_class(cls: str) -> bool:
     """Cross třídy mají 'X1' v názvu (MX1, WX1, MX1J, X1M-ZS, X1Z-ZM, …)."""
     return "X1" in cls and "C2X" not in cls
-
-
-def _is_junior_class(cls: str) -> bool:
-    """Junior třída (suffix J nebo obsahuje JUN)."""
-    return cls.endswith("J") or "JUN" in cls or "ZM" in cls or "ZS" in cls and "X" in cls and False
-    # Pozn.: -ZM/-ZS jsou žákovské kategorie (samostatné třídy), ne junior marker v dospělé třídě.
-    # Junior marker se používá jen pokud paddler je v dospělé třídě (MX1) a zároveň junior (MX1J).
-
-
-def _adult_class_of(junior_cls: str) -> str:
-    """Vrátí dospělou variantu junior třídy. MX1J → MX1, WX1J → WX1."""
-    if junior_cls.endswith("J"):
-        return junior_cls[:-1]
-    return junior_cls
 
 
 def _year_from_birthdate(elem, tag) -> str:
@@ -294,47 +282,134 @@ def _fmt_float(value: float) -> str:
     return f"{value:.2f}".replace(".", ",")
 
 
-def _cell_text(cell: TableCell) -> str:
-    return teletype.extractText(cell)
+def _clone_empty_data_row(template_row: TableRow) -> TableRow:
+    """Postaví nový prázdný řádek se stejnou strukturou buněk jako šablona.
+
+    Kopíruje pouze stylename a numbercolumnsrepeated atributy z buněk.
+    Nepoužívá deepcopy kvůli odfpy element-cache problémům.
+    """
+    new_row = TableRow()
+    style = template_row.getAttribute("stylename")
+    if style:
+        new_row.setAttribute("stylename", style)
+    for cell in template_row.getElementsByType(TableCell):
+        new_cell = TableCell()
+        cstyle = cell.getAttribute("stylename")
+        if cstyle:
+            new_cell.setAttribute("stylename", cstyle)
+        ncr = int(cell.getAttribute("numbercolumnsrepeated") or 1)
+        if ncr > 1:
+            new_cell.setAttribute("numbercolumnsrepeated", str(ncr))
+        new_row.addElement(new_cell)
+    return new_row
+
+
+def _ensure_data_capacity(sheet: Table, n_data_rows: int) -> None:
+    """Zaručí, že sheet má aspoň `2 + n_data_rows` vedoucích single-row TableRow elementů
+    (2 = řádek hlavičky závodu + řádek záhlaví sloupců).
+
+    Šablony klonované z Troja MX1-F mívají ~52 single data řádků (rows 2-53),
+    pak řádek s `numberrowsrepeated` v řádu stovek/milionu. Kdybychom psali data
+    přímo do toho repeat řádku, naše hodnoty by se zobrazily ve všech jeho
+    logických řádcích — viditelná chyba.
+
+    Tato funkce před psaním rozšíří kapacitu: vezme první repeat řádek, sníží
+    jeho `numberrowsrepeated` o potřebný počet, a vloží před něj odpovídající
+    počet single řádků (klonovaných z posledního single template řádku).
+    """
+    rows = list(sheet.getElementsByType(TableRow))
+    leading_single = 0
+    for r in rows:
+        if int(r.getAttribute("numberrowsrepeated") or 1) == 1:
+            leading_single += 1
+        else:
+            break
+    needed = 2 + n_data_rows
+    if leading_single >= needed:
+        return
+    if leading_single == 0 or leading_single >= len(rows):
+        return
+    # Klonovat preferenčně z první data-řádky (rows[2]) — Eskymo šablony mívají
+    # na konci single sekce "buffer řádek" s odlišnými styly (např. row 54 v
+    # MX1-indiv. má ce4 místo ce3). Klonování z rows[2] dává konzistentní styly.
+    template_row = rows[2] if len(rows) > 2 else rows[leading_single - 1]
+    repeat_row = rows[leading_single]
+    rep = int(repeat_row.getAttribute("numberrowsrepeated") or 1)
+    add_count = needed - leading_single
+    if add_count > rep:
+        add_count = rep
+    new_rep = rep - add_count
+    if new_rep > 1:
+        repeat_row.setAttribute("numberrowsrepeated", str(new_rep))
+    elif new_rep == 1:
+        if repeat_row.getAttribute("numberrowsrepeated"):
+            repeat_row.removeAttribute("numberrowsrepeated")
+    parent = repeat_row.parentNode
+    for _ in range(add_count):
+        new_row = _clone_empty_data_row(template_row)
+        parent.insertBefore(new_row, repeat_row)
 
 
 # -------- sheet name matching --------
 
+# Suffixy pro Q (kvalifikace) a F (finále) sheety. Q sheet má víc variant
+# protože Eskymo šablony se historicky pojmenovávaly různě (`-Q` v novějších,
+# `-indiv.` v Troja kajak-kros, `-indiv` bez tečky v některých derivátech).
+Q_SHEET_SUFFIXES = ("-Q", "-indiv.", "-indiv")
+F_SHEET_SUFFIXES = ("-F",)
+
+
 def _permute_class(cls: str) -> str:
-    """MX1 → X1M, WX1J → X1WJ. Beze změny pro jiné formáty."""
+    """MX1 → X1M, WX1J → X1WJ. Beze změny pro jiné formáty.
+
+    Canoe123 používá MX1/WX1 (gender-first), Eskymo cross šablony někdy
+    X1M/X1W (discipline-first). Sheet lookup zkouší obě varianty.
+    """
     m = re.fullmatch(r"([MW])X1(.*)", cls)
     if m:
         return f"X1{m.group(1)}{m.group(2)}"
     return cls
 
 
+def _class_name_variants(cls: str) -> list[str]:
+    """[cls] nebo [cls, permuted_cls] pokud permutace dává jiný název."""
+    permuted = _permute_class(cls)
+    return [cls] if permuted == cls else [cls, permuted]
+
+
+def _sheet_candidates(cls: str, sheet_type: str) -> list[str]:
+    """Vrátí všechna jména sheetů, na která se má pro danou třídu+typ kouknout,
+    v pořadí preference (první nalezený vyhraje).
+
+    Pravidla:
+      - Dospělá třída (MX1, X1M-ZS, …): `<cls>-Q` / `-indiv.` pro Q, `<cls>-F` pro F.
+        Plus MX1↔X1M permutace.
+      - Junior třída (MX1J): nejdřív vlastní sheet (MX1J-Q, MX1J-F),
+        pak fallback na dospělý sheet s JUN suffixem (MX1-F-JUN, MX1-Q-JUN).
+    """
+    is_junior = cls.endswith("J")
+    out: list[str] = []
+    cls_vars = _class_name_variants(cls)
+
+    if sheet_type == "Q":
+        out += [f"{c}{s}" for c in cls_vars for s in Q_SHEET_SUFFIXES]
+        if is_junior:
+            adult_vars = _class_name_variants(cls[:-1])
+            out += [f"{c}-Q-JUN" for c in adult_vars]
+            out += [f"{c}-indiv.-JUN" for c in adult_vars]
+    else:  # F
+        if is_junior:
+            # Junior F: preferuj `*-F-JUN` pod dospělou třídou.
+            adult_vars = _class_name_variants(cls[:-1])
+            out += [f"{c}-F-JUN" for c in adult_vars]
+        out += [f"{c}{s}" for c in cls_vars for s in F_SHEET_SUFFIXES]
+
+    return out
+
+
 def find_sheet_for(doc, cls: str, sheet_type: str) -> Table | None:
     """Najde sheet pro danou třídu a typ ('Q' = kvalifikace, 'F' = finále)."""
-    is_junior = cls.endswith("J")
-    candidates: list[str] = []
-    if is_junior:
-        base = cls[:-1]
-        permuted_base = _permute_class(base)
-        permuted_cls = _permute_class(cls)
-        if sheet_type == "Q":
-            for c in (cls, permuted_cls):
-                candidates += [f"{c}-Q", f"{c}-indiv.", f"{c}-indiv"]
-            for c in (base, permuted_base):
-                candidates += [f"{c}-Q-JUN", f"{c}-indiv.-JUN"]
-        else:  # F
-            for c in (base, permuted_base):
-                candidates += [f"{c}-F-JUN"]
-            for c in (cls, permuted_cls):
-                candidates += [f"{c}-F"]
-    else:
-        permuted = _permute_class(cls)
-        if sheet_type == "Q":
-            for c in (cls, permuted):
-                candidates += [f"{c}-Q", f"{c}-indiv.", f"{c}-indiv"]
-        else:
-            for c in (cls, permuted):
-                candidates += [f"{c}-F"]
-    for name in candidates:
+    for name in _sheet_candidates(cls, sheet_type):
         sheet = get_sheet(doc, name)
         if sheet is not None:
             return sheet
@@ -401,27 +476,23 @@ def load_registry(doc) -> dict:
 
 
 def _participant_info(p: dict, registry: dict | None = None) -> dict:
-    """Společné info ze XML <Participants> + lookup do `reg` pro
-    zkratku oddílu (pokud reg sheet existuje v šabloně).
+    """Společné info ze XML <Participants>. Pokud existuje `reg` sheet v šabloně,
+    preferuje z něj zkratku oddílu (XML má často dlouhý oficiální název klubu).
     """
-    family = p["family"]
-    given = p["given"]
     year = p["year"]
     club = p["club"]
     if registry and p["icf"]:
         reg = registry.get(p["icf"])
         if reg:
-            # Preferuj data z reg (zkrácený oddíl, normalizovaná jména)
             if reg["oddil_short"]:
                 club = reg["oddil_short"]
-            # reg může mít přesnější rok narození pokud XML to nemá
             if not year and reg["year"]:
                 year = reg["year"]
     return {
         "icf": p["icf"],
-        "family": family,
-        "given": given,
-        "name": f"{family} {given}".strip(),
+        "family": p["family"],
+        "given": p["given"],
+        "name": f"{p['family']} {p['given']}".strip(),
         "year": year,
         "club": club,
     }
@@ -448,24 +519,33 @@ def collect_xt_data(participants: list[dict], results: dict, class_id: str, day:
     return rows
 
 
-def collect_xer_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = "", registry: dict | None = None):
-    """Pro F sheet — XER (Event Result, eliminace) má všechno potřebné:
+def collect_xer_data(participants: list[dict], results: dict, class_id: str,
+                     day_xer: str, day_xt: str, attr: str = "",
+                     registry: dict | None = None):
+    """Pro F sheet — XER (Event Result, eliminace) + XT data pro col 11.
 
-    - `Bib`: pro finalisty číslo (XS bib), pro ne-finalisty 't 4' formát
-    - `Rnk`: celkové pořadí v eliminaci
-    - `RecordType`: 'F' = finalist (postoupil do pavouka), 'T' = jen z XT
-    - `Time`: pro RecordType='T' obsahuje XT čas
-    - `Status`: DNS/DNF/DSQ
+    XER má:
+      - `Bib`: pro finalisty číslo (XS bib), pro ne-finalisty 't N' formát
+      - `Rnk`: celkové pořadí v eliminaci (faulted runs jsou Canoe123 řazené
+        správně až za clean runs)
+      - `Time`: pro ne-pavoukové = XT čas, pro pavoukové prázdné
+      - `Status`: DNS/DNF/DSQ pro vypadlé
+
+    XT (kvalifikace) data se přibalí pro vyplnění "1. jízda" sloupce v F sheetu
+    — bez toho by pavoukoví (bracket) finalisté měli prázdné col 11.
     """
     suffix = f"_{attr}" if attr else ""
-    race = f"{class_id}_XER_{day}{suffix}"
+    race_xer = f"{class_id}_XER_{day_xer}{suffix}"
+    race_xt = f"{class_id}_XT_{day_xt}{suffix}"
     rows = []
     for p in participants:
-        r = results.get((race, p["id"]))
+        r = results.get((race_xer, p["id"]))
         if not r:
             continue
+        xt = results.get((race_xt, p["id"])) or {}
         rows.append({
             **_participant_info(p, registry),
+            # XER (eliminace):
             "bib_raw": r.get("bib_raw"),
             "bib_int": r.get("bib_int"),
             "time_ms": r.get("time_ms"),
@@ -473,6 +553,10 @@ def collect_xer_data(participants: list[dict], results: dict, class_id: str, day
             "rnk": r.get("rnk"),
             "record_type": (r.get("record_type") or "").upper(),
             "flt": r.get("flt") or "",
+            # XT (kvalifikace) — pro col 11 "1. jízda" v F sheet:
+            "xt_time_ms": xt.get("time_ms"),
+            "xt_status": (xt.get("status") or "").upper(),
+            "xt_flt": xt.get("flt") or "",
         })
     return rows
 
@@ -482,7 +566,7 @@ def _has_time(d: dict) -> bool:
         and d.get("status") not in ("DNS", "DNF", "DSQ")
 
 
-# -------- sheet filling --------
+# -------- cell-write helpers (sdílené Q i F sheet) --------
 
 def _set_jun_marker(row: TableRow, is_junior: bool) -> None:
     if is_junior:
@@ -527,19 +611,31 @@ def _set_final_rank(row: TableRow, rank: int) -> None:
     set_cell_float(get_cell_at(row, COL_FINAL_RANK), rank)
 
 
-def _clear_data_row(row: TableRow, full: bool = True) -> None:
-    """Vyčistí data v řádku — pro 'leftover' řádky šablony.
+def _clear_data_row(row: TableRow) -> None:
+    """Vyčistí všechny data sloupce (0-15) řádku — důležité pro šablonu
+    vytvořenou kopií Troja, kde zůstávají časy, FLT markery, celkové časy
+    a další stale data ve sloupcích, které nepřepisujeme daty z aktuálního
+    závodu.
 
-    `full=True` (default) vyčistí všechny sloupce 0-15 — to je důležité
-    pro šablonu vytvořenou kopií Troja, kde zůstávají časy, FLT markery,
-    celkové časy a další stale data ve sloupcích, které nepřepisujeme
-    daty z aktuálního závodu.
+    Body sloupce (16, 17) se NEVYČISTÍ — pro finishery jsou tam statické
+    hodnoty z šablony (32, 30, ..., 2 pro top 16 řádků), které správně
+    odpovídají ranku podle pozice. Pro DNS / prázdné řádky zavolej
+    `_clear_body_cols(row)` zvlášť.
     """
-    cols = range(16) if full else (COL_POR, COL_VK, COL_JUN, COL_BIB, COL_RGC,
-                                    COL_NAME, COL_YEAR, COL_CLUB, COL_TIME_Q,
-                                    COL_FINAL_RANK)
-    for col in cols:
+    for col in range(16):
         clear_cell(get_cell_at(row, col))
+
+
+def _clear_body_cols(row: TableRow) -> None:
+    """Vyčistí body sloupce (16, 17) — pro DNS řádky a trailing prázdné řádky.
+
+    Body je v šabloně statická tabulka pozice→bod (32, 30, ..., 2). Pro
+    finishery sedí, ale pro DNS / prázdné řádky bys jinak ukazoval body
+    pro neexistující rank. Volej až POTÉ co je jasné, že řádek nemá
+    finishera s rankem.
+    """
+    clear_cell(get_cell_at(row, COL_BODY))
+    clear_cell(get_cell_at(row, COL_BODY_JUN))
 
 
 def _set_flt(row: TableRow, flt: str) -> None:
@@ -563,128 +659,186 @@ def _set_person_info(row: TableRow, info: dict) -> None:
         set_cell_string(get_cell_at(row, COL_CLUB), info["club"])
 
 
-def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set) -> int:
-    """Naplní Q sheet z XT (Individual Time Trial) — vše seřazené podle XT Rnk.
-
-    DNS na konci (bez poř.).
+def _clear_trailing_rows(rows: list[TableRow], start_idx: int) -> None:
+    """Vyčistí trailing single řádky (data + body sloupce). Zastaví u prvního
+    řádku s `numberrowsrepeated > 1` — ten reprezentuje stovky/miliony prázdných
+    řádků pod ním, ty se nedotýkáme.
     """
-    rows = list(sheet.getElementsByType(TableRow))
-    finishers = [r for r in xt_rows if _has_time(r)]
-    finishers.sort(key=lambda x: x["xt_rnk"])
-    dns_rows = [r for r in xt_rows if not _has_time(r)]
-    dns_rows.sort(key=lambda x: x["bib_xt"] or 99999)
-
-    row_idx = 2
-    rank = 0
-    for x in finishers:
-        if row_idx >= len(rows):
-            break
-        rank += 1
-        row = rows[row_idx]
-        _clear_data_row(row)
-        _set_por(row, rank)
-        _set_jun_marker(row, x["icf"] in junior_icfs)
-        _set_bib(row, bib_int=x["bib_xt"])
-        _set_rgc(row, x["icf"])
-        _set_person_info(row, x)
-        _set_time(row, x)
-        _set_flt(row, x.get("flt", ""))
-        row_idx += 1
-    for x in dns_rows:
-        if row_idx >= len(rows):
-            break
-        row = rows[row_idx]
-        _clear_data_row(row)
-        _set_por(row, None)
-        _set_jun_marker(row, x["icf"] in junior_icfs)
-        _set_bib(row, bib_int=x["bib_xt"])
-        _set_rgc(row, x["icf"])
-        _set_person_info(row, x)
-        _set_time(row, x)
-        row_idx += 1
-
-    for j in range(row_idx, len(rows)):
+    for j in range(start_idx, len(rows)):
         rep = int(rows[j].getAttribute("numberrowsrepeated") or 1)
         if rep > 1:
             break
         _clear_data_row(rows[j])
+        _clear_body_cols(rows[j])
+
+
+# -------- Q sheet (XT — Individual Time Trial) --------
+
+def _write_xt_row(row: TableRow, x: dict, rank: int | None, junior_icfs: set) -> None:
+    """Zapíše jeden řádek Q sheetu. `rank=None` znamená DNS (bez poř., bez body)."""
+    if rank is None:
+        _clear_body_cols(row)
+    _set_por(row, rank)
+    _set_jun_marker(row, x["icf"] in junior_icfs)
+    _set_bib(row, bib_int=x["bib_xt"])
+    _set_rgc(row, x["icf"])
+    _set_person_info(row, x)
+    _set_time(row, x)
+    if rank is not None:
+        _set_flt(row, x.get("flt", ""))
+
+
+def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set,
+                 clear_body: bool = False) -> int:
+    """Naplní Q sheet z XT (Individual Time Trial).
+
+    Finišeři první (seřazení podle XT Rnk), DNS na konci (bez poř., bez body).
+    `clear_body=True` — vyčistí body sloupce (16, 17) pro všechny napsané řádky.
+    """
+    _ensure_data_capacity(sheet, len(xt_rows))
+    rows = list(sheet.getElementsByType(TableRow))
+    finishers = sorted((x for x in xt_rows if _has_time(x)),
+                       key=lambda x: x["xt_rnk"])
+    dns = sorted((x for x in xt_rows if not _has_time(x)),
+                 key=lambda x: x["bib_xt"] or 99999)
+
+    row_idx = 2
+    for rank, x in enumerate(finishers, start=1):
+        if row_idx >= len(rows):
+            break
+        _clear_data_row(rows[row_idx])
+        _write_xt_row(rows[row_idx], x, rank, junior_icfs)
+        if clear_body:
+            _clear_body_cols(rows[row_idx])
+        row_idx += 1
+    for x in dns:
+        if row_idx >= len(rows):
+            break
+        _clear_data_row(rows[row_idx])
+        _write_xt_row(rows[row_idx], x, None, junior_icfs)
+        row_idx += 1
+
+    _clear_trailing_rows(rows, row_idx)
     return row_idx - 2
 
 
-def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set) -> int:
+# -------- F sheet (XER — Event Result eliminace) --------
+
+# Kategorie XER záznamu pro F sheet.
+CAT_BRACKET = "bracket"        # postoupil do pavouka, Bib = XS číslo
+CAT_NON_BRACKET = "non_bracket"  # nepostoupil, ale měl čas z XT; Bib = "t N"
+CAT_DNS = "dns"                # DNS/DNF/DSQ nebo bez času
+
+
+def _classify_xer_row(x: dict) -> str:
+    """Vrátí CAT_BRACKET / CAT_NON_BRACKET / CAT_DNS pro XER záznam.
+
+    Klíč je tvar `Bib`: pavoukoví mají čistě číslo (např. "3"),
+    ne-pavoukoví mají "t N" string. To je nejspolehlivější signál
+    (RecordType F/SF/QF/T má víc úrovní, neslouží jednoznačně).
+    """
+    in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
+    if in_bracket:
+        return CAT_BRACKET
+    is_dns = x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
+    if is_dns or not x["time_ms"]:
+        return CAT_DNS
+    return CAT_NON_BRACKET
+
+
+def _sort_xer_rows(xer_rows: list[dict]) -> list[tuple[dict, str]]:
+    """Vrátí [(row, category), …] seřazené pro zápis do F sheetu.
+
+    Pořadí: pavoukoví (XER Rnk 1-8) → ne-pavoukoví finišeři (XER Rnk 9+) → DNS.
+
+    Pro ne-pavoukové NEPOUŽÍVAT sort podle `time_ms` — Canoe123 v XER Rnk
+    už správně řadí faulted runs ZA clean runs (KOS s FLT(3) má time 61.04s
+    ale rnk 24, až za clean runs s časy 79.46s). Sort by time by ho dal nahoru.
+    """
+    cats = [(x, _classify_xer_row(x)) for x in xer_rows]
+    bracket = [(x, c) for x, c in cats if c == CAT_BRACKET]
+    non_bracket = [(x, c) for x, c in cats if c == CAT_NON_BRACKET]
+    dns = [(x, c) for x, c in cats if c == CAT_DNS]
+    bracket.sort(key=lambda t: t[0]["rnk"] or 99999)
+    non_bracket.sort(key=lambda t: t[0]["rnk"] or 99999)
+    dns.sort(key=lambda t: t[0].get("bib_int") or 99999)
+    return bracket + non_bracket + dns
+
+
+def _write_xt_time_or_status(row: TableRow, xt_time_ms, xt_status: str, xt_flt: str) -> None:
+    """Zapíše do "1. jízda" (col 11) XT čas nebo status. Pro F sheet — bracket
+    finalisté nemají XT čas v XER, ale tu informaci chceme ukázat (vyhledali
+    jsme ji v XT race).
+    """
+    if xt_time_ms:
+        set_cell_float(get_cell_at(row, COL_TIME_Q), xt_time_ms / 1000.0)
+        if xt_flt:
+            _set_flt(row, xt_flt)
+    elif xt_status in ("DNS", "DNF", "DSQ"):
+        set_cell_string(get_cell_at(row, COL_TIME_Q), xt_status)
+
+
+def _write_xer_row(row: TableRow, x: dict, category: str,
+                   seq_rank: int | None, junior_icfs: set) -> None:
+    """Zapíše jeden řádek F sheetu podle kategorie.
+
+    "1. jízda" (col 11) se zapisuje z XT dat pro VŠECHNY kategorie (i bracket),
+    protože XER pro bracket finalisty Time element nemá.
+    """
+    if seq_rank is None:
+        # DNS: bez poř., bez body (template body table by dávala chybný bod).
+        _clear_body_cols(row)
+    else:
+        _set_por(row, seq_rank)
+    _set_jun_marker(row, x["icf"] in junior_icfs)
+
+    # XT data v "1. jízda" sloupci — sdílené pro bracket / non-bracket / DNS.
+    _write_xt_time_or_status(row, x.get("xt_time_ms"), x.get("xt_status", ""),
+                              x.get("xt_flt", ""))
+
+    # Bib a finále rank podle kategorie.
+    if category == CAT_BRACKET:
+        _set_bib(row, bib_int=x["bib_int"])
+        if x["rnk"] is not None:
+            _set_final_rank(row, x["rnk"])
+    else:
+        # Ne-pavoukoví (finišer i DNS) mají "t N" bib.
+        _set_bib(row, bib_raw=x["bib_raw"])
+
+    _set_rgc(row, x["icf"])
+    _set_person_info(row, x)
+
+
+def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set,
+                 clear_body: bool = False) -> int:
     """Naplní F sheet z XER (Event Result, eliminace).
 
-    XER má pro každého paddler vše potřebné:
-      - Finalisté (RecordType=F): bib = XS bib (číslo), col 13 = finále rank
-      - Ne-finalisté (RecordType=T s časem): bib = 't N' string, col 11 = XT time
-      - DNS (RecordType=T, Status=DNS): bib = 't N', col 11 = 'DNS', poř. = empty
+    Sloupce z XER:
+      - Finalisté (Bib = číslo): postoupili do pavouka, col 13 = finále rank
+      - Ne-finalisté (Bib = "t N"): col 11 = XT čas (lookup z XT race)
+      - DNS (Bib = "t N", Status=DNS nebo Rnk=None): poř. prázdné, XT status v col 11
+
+    `clear_body=True` — vyčistí body sloupce (16, 17) pro všechny napsané řádky.
     """
+    _ensure_data_capacity(sheet, len(xer_rows))
     rows = list(sheet.getElementsByType(TableRow))
 
-    # Rozdělit XER záznamy: pavoukoví (Bib je číslo) vs. ne-pavoukoví ('t N'),
-    # plus DNS/DNF.
-    bracket = []
-    non_bracket_finishers = []
-    dns_rows = []
-    for x in xer_rows:
-        in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
-        is_dns = x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
-        if in_bracket:
-            bracket.append(x)
-        elif is_dns or not x["time_ms"]:
-            dns_rows.append(x)
-        else:
-            non_bracket_finishers.append(x)
-
-    # Pavoukoví: podle XER Rnk (Canoe123 to v pavoukovi řadí správně).
-    bracket.sort(key=lambda x: x["rnk"] or 99999)
-    # Ne-pavoukoví finišeři: podle skutečného času, ne XER Rnk
-    # (Canoe123 XER Rnk pro ne-pavoukové bývá nekonzistentní).
-    non_bracket_finishers.sort(key=lambda x: x["time_ms"] or 99999999)
-    # DNS na konec, stabilně podle bib.
-    dns_rows.sort(key=lambda x: x.get("bib_int") or 99999)
-
-    xer_rows_sorted = bracket + non_bracket_finishers + dns_rows
-
-    # Sequential rank counter pro celý sheet (1..N pro finišery, prázdné pro DNS)
     row_idx = 2
     seq_rank = 0
-    for x in xer_rows_sorted:
+    for x, category in _sort_xer_rows(xer_rows):
         if row_idx >= len(rows):
             break
-        row = rows[row_idx]
-        _clear_data_row(row)
-        in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
-        is_dns_no_rank = (not in_bracket) and (
-            x["status"] in ("DNS", "DNF", "DSQ") or not x["time_ms"]
-        )
-
-        if not is_dns_no_rank:
-            seq_rank += 1
-            _set_por(row, seq_rank)
-        # else: poř. zůstává prázdné (DNS na konci)
-
-        _set_jun_marker(row, x["icf"] in junior_icfs)
-        if in_bracket:
-            _set_bib(row, bib_int=x["bib_int"])
-            if x["rnk"] is not None:
-                _set_final_rank(row, x["rnk"])
+        _clear_data_row(rows[row_idx])
+        if category == CAT_DNS:
+            _write_xer_row(rows[row_idx], x, category, None, junior_icfs)
         else:
-            _set_bib(row, bib_raw=x["bib_raw"])
-            if is_dns_no_rank:
-                set_cell_string(get_cell_at(row, COL_TIME_Q), x["status"] or "DNS")
-            elif x["time_ms"]:
-                set_cell_float(get_cell_at(row, COL_TIME_Q), x["time_ms"] / 1000.0)
-            _set_flt(row, x.get("flt", ""))
-        _set_rgc(row, x["icf"])
-        _set_person_info(row, x)
+            seq_rank += 1
+            _write_xer_row(rows[row_idx], x, category, seq_rank, junior_icfs)
+        if clear_body:
+            _clear_body_cols(rows[row_idx])
         row_idx += 1
 
-    for j in range(row_idx, len(rows)):
-        rep = int(rows[j].getAttribute("numberrowsrepeated") or 1)
-        if rep > 1:
-            break
-        _clear_data_row(rows[j])
+    _clear_trailing_rows(rows, row_idx)
     return row_idx - 2
 
 
@@ -701,6 +855,18 @@ def update_param(doc, race_num: int | None, date: str | None, name: str | None) 
         set_cell_string(get_cell_at(rows[7], 1), date)
     if race_num is not None and len(rows) > 8:
         set_cell_float(get_cell_at(rows[8], 1), race_num)
+
+
+def update_sheet_header_date(sheet: Table, date: str) -> None:
+    """Přepíše datum v hlavičce cross sheetu (row 0 col 2).
+
+    Cross šablony nemají `param` sheet (na rozdíl od slalomu) — datum
+    se zapisuje přímo do hlavičky každého výsledkového sheetu.
+    """
+    rows = list(sheet.getElementsByType(TableRow))
+    if not rows:
+        return
+    set_cell_string(get_cell_at(rows[0], 2), date)
 
 
 def _day_arg(s: str) -> str:
@@ -721,6 +887,8 @@ def main():
     ap.add_argument("--race", type=int, help="Číslo závodu pro param (volitelně)")
     ap.add_argument("--date", help="Datum pro param, např. 26.04.26 (volitelně)")
     ap.add_argument("--name", help="Název závodu pro param (volitelně)")
+    ap.add_argument("--no-body", action="store_true",
+                    help="Smaž body sloupce (16, 17). Pro žákovské kategorie, kde body nedávají smysl.")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -771,12 +939,20 @@ def main():
 
         if sheet_q is not None:
             xt_rows = collect_xt_data(parts, results, cls, day, attr, registry)
-            n = fill_q_sheet(sheet_q, xt_rows, junior_icfs)
+            n = fill_q_sheet(sheet_q, xt_rows, junior_icfs,
+                             clear_body=args.no_body)
+            if args.date:
+                update_sheet_header_date(sheet_q, args.date)
             print(f"  {cls} → {sheet_q.getAttribute('name')}: {n} řádků v kvalifikaci")
 
         if sheet_f is not None:
-            xer_rows = collect_xer_data(parts, results, cls, day_final, attr, registry)
-            n = fill_f_sheet(sheet_f, xer_rows, junior_icfs)
+            xer_rows = collect_xer_data(parts, results, cls,
+                                         day_xer=day_final, day_xt=day,
+                                         attr=attr, registry=registry)
+            n = fill_f_sheet(sheet_f, xer_rows, junior_icfs,
+                             clear_body=args.no_body)
+            if args.date:
+                update_sheet_header_date(sheet_f, args.date)
             print(f"  {cls} → {sheet_f.getAttribute('name')}: {n} řádků v eliminaci")
 
     print(f"Ukládám: {args.output}")
