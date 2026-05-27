@@ -77,6 +77,7 @@ COL_NAME = 5      # jméno (FamilyName + GivenName)
 COL_YEAR = 6      # rok narození
 COL_CLUB = 8      # oddíl (klub)
 COL_TIME_Q = 11   # čas v kvalifikaci (Q sheet) nebo XT čas pro ne-finalisty v F sheet
+COL_FLT = 12      # 'FLT(7)' marker pro failed gate
 COL_FINAL_RANK = 13  # finále rank (XER)
 
 
@@ -146,6 +147,7 @@ def parse_xml(xml_path: str):
                 "rnk": _int(elem, "Rnk") or _int(elem, "RnkOrder"),
                 "status": _text(elem, "Status"),
                 "record_type": _text(elem, "RecordType"),  # F = finalist, T = z time trial
+                "flt": _text(elem, "FLT"),  # "FLT(7)" pro failed gate (přesahuje 50sec penalty)
             }
     return participants_by_class, results, schedules
 
@@ -441,6 +443,7 @@ def collect_xt_data(participants: list[dict], results: dict, class_id: str, day:
             "pen": r.get("pen") or 0,
             "status": (r.get("status") or "").upper(),
             "xt_rnk": r.get("rnk") or 99999,
+            "flt": r.get("flt") or "",
         })
     return rows
 
@@ -469,6 +472,7 @@ def collect_xer_data(participants: list[dict], results: dict, class_id: str, day
             "status": (r.get("status") or "").upper(),
             "rnk": r.get("rnk"),
             "record_type": (r.get("record_type") or "").upper(),
+            "flt": r.get("flt") or "",
         })
     return rows
 
@@ -523,11 +527,26 @@ def _set_final_rank(row: TableRow, rank: int) -> None:
     set_cell_float(get_cell_at(row, COL_FINAL_RANK), rank)
 
 
-def _clear_data_row(row: TableRow) -> None:
-    """Vyčistí data v řádku — pro 'leftover' řádky šablony."""
-    for col in (COL_POR, COL_VK, COL_JUN, COL_BIB, COL_RGC, COL_NAME, COL_YEAR,
-                COL_CLUB, COL_TIME_Q, COL_FINAL_RANK):
+def _clear_data_row(row: TableRow, full: bool = True) -> None:
+    """Vyčistí data v řádku — pro 'leftover' řádky šablony.
+
+    `full=True` (default) vyčistí všechny sloupce 0-15 — to je důležité
+    pro šablonu vytvořenou kopií Troja, kde zůstávají časy, FLT markery,
+    celkové časy a další stale data ve sloupcích, které nepřepisujeme
+    daty z aktuálního závodu.
+    """
+    cols = range(16) if full else (COL_POR, COL_VK, COL_JUN, COL_BIB, COL_RGC,
+                                    COL_NAME, COL_YEAR, COL_CLUB, COL_TIME_Q,
+                                    COL_FINAL_RANK)
+    for col in cols:
         clear_cell(get_cell_at(row, col))
+
+
+def _set_flt(row: TableRow, flt: str) -> None:
+    """Zapíše FLT marker ('FLT(7)' pro failed gate) do col 12. Pokud prázdné,
+    necháme buňku vyčištěnou (clear_data_row to už udělalo)."""
+    if flt:
+        set_cell_string(get_cell_at(row, COL_FLT), flt)
 
 
 def _set_person_info(row: TableRow, info: dict) -> None:
@@ -569,6 +588,7 @@ def fill_q_sheet(sheet: Table, xt_rows: list[dict], junior_icfs: set) -> int:
         _set_rgc(row, x["icf"])
         _set_person_info(row, x)
         _set_time(row, x)
+        _set_flt(row, x.get("flt", ""))
         row_idx += 1
     for x in dns_rows:
         if row_idx >= len(rows):
@@ -600,27 +620,50 @@ def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set) -> int:
       - DNS (RecordType=T, Status=DNS): bib = 't N', col 11 = 'DNS', poř. = empty
     """
     rows = list(sheet.getElementsByType(TableRow))
-    # Sortuj podle Rnk (None na konec — DNS)
-    xer_rows = sorted(xer_rows, key=lambda x: (x["rnk"] is None, x["rnk"] or 99999))
 
-    row_idx = 2
+    # Rozdělit XER záznamy: pavoukoví (Bib je číslo) vs. ne-pavoukoví ('t N'),
+    # plus DNS/DNF.
+    bracket = []
+    non_bracket_finishers = []
+    dns_rows = []
     for x in xer_rows:
+        in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
+        is_dns = x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
+        if in_bracket:
+            bracket.append(x)
+        elif is_dns or not x["time_ms"]:
+            dns_rows.append(x)
+        else:
+            non_bracket_finishers.append(x)
+
+    # Pavoukoví: podle XER Rnk (Canoe123 to v pavoukovi řadí správně).
+    bracket.sort(key=lambda x: x["rnk"] or 99999)
+    # Ne-pavoukoví finišeři: podle skutečného času, ne XER Rnk
+    # (Canoe123 XER Rnk pro ne-pavoukové bývá nekonzistentní).
+    non_bracket_finishers.sort(key=lambda x: x["time_ms"] or 99999999)
+    # DNS na konec, stabilně podle bib.
+    dns_rows.sort(key=lambda x: x.get("bib_int") or 99999)
+
+    xer_rows_sorted = bracket + non_bracket_finishers + dns_rows
+
+    # Sequential rank counter pro celý sheet (1..N pro finišery, prázdné pro DNS)
+    row_idx = 2
+    seq_rank = 0
+    for x in xer_rows_sorted:
         if row_idx >= len(rows):
             break
         row = rows[row_idx]
         _clear_data_row(row)
-        # Byl v pavoukovi (F nebo SF, případně QF, …) — Canoe123 to indikuje
-        # tím, že Bib v XER je číslo (XS bib), ne 't N' řetězec. Spolehlivější
-        # než RecordType (Canoe123 má F/SF/QF/… podle hloubky pavouka).
         in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
-        # DNS/DNF "mimo pavouk" (závodník nezačal nebo nedokončil XT) je bez
-        # pořadí. Pavoukoví závodníci s DNF/DSQ na pavoukovi si pořadí
-        # zachovají (XER Rnk = jejich finální místo).
         is_dns_no_rank = (not in_bracket) and (
-            x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
+            x["status"] in ("DNS", "DNF", "DSQ") or not x["time_ms"]
         )
 
-        _set_por(row, None if is_dns_no_rank else x["rnk"])
+        if not is_dns_no_rank:
+            seq_rank += 1
+            _set_por(row, seq_rank)
+        # else: poř. zůstává prázdné (DNS na konci)
+
         _set_jun_marker(row, x["icf"] in junior_icfs)
         if in_bracket:
             _set_bib(row, bib_int=x["bib_int"])
@@ -632,6 +675,7 @@ def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set) -> int:
                 set_cell_string(get_cell_at(row, COL_TIME_Q), x["status"] or "DNS")
             elif x["time_ms"]:
                 set_cell_float(get_cell_at(row, COL_TIME_Q), x["time_ms"] / 1000.0)
+            _set_flt(row, x.get("flt", ""))
         _set_rgc(row, x["icf"])
         _set_person_info(row, x)
         row_idx += 1
