@@ -14,6 +14,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent
 TROJA_EMPTY = ROOT.parent.parent / "tests" / "2026.troja.cross" / "empty.ods"
+SLALOM_EMPTY = ROOT / "49_empty.ods"  # slalom šablona ČB má reg sheet
 
 CATEGORIES = ["X1M-ZM", "X1M-ZS", "X1Z-ZM", "X1Z-ZS"]
 
@@ -74,13 +75,21 @@ def make_template(source_sheet_name: str, output_path: Path,
     content = _read_ods_content(TROJA_EMPTY)
     base_sheet_xml = _extract_sheet_xml(content, source_sheet_name)
 
-    # Najít všechny <table:table…</table:table> a smazat (kromě hlaviček apod.)
-    # Pak vložit nové
-    # Vlastně lépe: nahradit všechny existující tabulky našimi novými
+    # 4 kopie přejmenované pro žákovské kategorie
     new_sheets_xml = ""
     for cls in CATEGORIES:
         label = f"{cls} {label_suffix}".strip()
         new_sheets_xml += _rename_sheet(base_sheet_xml, f"{cls}-{suffix}", label)
+
+    # Přidat reg sheet ze slalom šablony (pro lookup zkratek oddílů)
+    if SLALOM_EMPTY.exists():
+        slalom_content = _read_ods_content(SLALOM_EMPTY)
+        try:
+            reg_xml = _extract_sheet_xml(slalom_content, "reg")
+            new_sheets_xml += reg_xml
+            print(f"  + reg sheet z {SLALOM_EMPTY.name}")
+        except RuntimeError:
+            print(f"  ! reg sheet nenalezen v {SLALOM_EMPTY.name}")
 
     # Najít první <table:table> a poslední </table:table>; nahradit blok
     first_match = re.search(r'<table:table\b', content)

@@ -352,19 +352,80 @@ def build_junior_icf_set(participants: dict, cls: str) -> set:
     return {p["icf"] for p in participants[junior_cls] if p["icf"]}
 
 
-def _participant_info(p: dict) -> dict:
-    """Společné info ze XML <Participants> — zapisuje se do jméno/nar./oddíl."""
+def _row_cells_expanded(row) -> list:
+    """Vrátí buňky v řádku po expanzi `numbercolumnsrepeated`.
+
+    Bez toho je index v `getElementsByType` fyzický, ne logický (col 12
+    z hlavičky může být fyzický index 7 protože uprostřed jsou
+    sloučené prázdné cells).
+    """
+    out = []
+    for c in row.getElementsByType(TableCell):
+        rep = int(c.getAttribute("numbercolumnsrepeated") or 1)
+        for _ in range(rep):
+            out.append(c)
+    return out
+
+
+def load_registry(doc) -> dict:
+    """Načte `reg` sheet z cross šablony (pokud existuje) — pro lookup
+    RGC → zkratka oddílu (col 12), případně rok narození (col 3).
+
+    Vrací dict RGC (string) → {family, given, year, oddil_short}.
+    """
+    out: dict = {}
+    sheet = get_sheet(doc, "reg")
+    if sheet is None:
+        return out
+    rows = list(sheet.getElementsByType(TableRow))
+    for row in rows[1:]:
+        cells = _row_cells_expanded(row)
+        if len(cells) < 4:
+            continue
+        rgc = teletype.extractText(cells[0]).strip()
+        if not rgc or not rgc.isdigit():
+            continue
+        family = teletype.extractText(cells[1]).strip()
+        given = teletype.extractText(cells[2]).strip() if len(cells) > 2 else ""
+        year = teletype.extractText(cells[3]).strip() if len(cells) > 3 else ""
+        oddil_short = teletype.extractText(cells[12]).strip() if len(cells) > 12 else ""
+        out[rgc] = {
+            "family": family,
+            "given": given,
+            "year": year,
+            "oddil_short": oddil_short,
+        }
+    return out
+
+
+def _participant_info(p: dict, registry: dict | None = None) -> dict:
+    """Společné info ze XML <Participants> + lookup do `reg` pro
+    zkratku oddílu (pokud reg sheet existuje v šabloně).
+    """
+    family = p["family"]
+    given = p["given"]
+    year = p["year"]
+    club = p["club"]
+    if registry and p["icf"]:
+        reg = registry.get(p["icf"])
+        if reg:
+            # Preferuj data z reg (zkrácený oddíl, normalizovaná jména)
+            if reg["oddil_short"]:
+                club = reg["oddil_short"]
+            # reg může mít přesnější rok narození pokud XML to nemá
+            if not year and reg["year"]:
+                year = reg["year"]
     return {
         "icf": p["icf"],
-        "family": p["family"],
-        "given": p["given"],
-        "name": f"{p['family']} {p['given']}".strip(),
-        "year": p["year"],
-        "club": p["club"],
+        "family": family,
+        "given": given,
+        "name": f"{family} {given}".strip(),
+        "year": year,
+        "club": club,
     }
 
 
-def collect_xt_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = ""):
+def collect_xt_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = "", registry: dict | None = None):
     """Pro Q sheet — XT (Individual Time Trial) results."""
     suffix = f"_{attr}" if attr else ""
     race = f"{class_id}_XT_{day}{suffix}"
@@ -374,7 +435,7 @@ def collect_xt_data(participants: list[dict], results: dict, class_id: str, day:
         if not r:
             continue
         rows.append({
-            **_participant_info(p),
+            **_participant_info(p, registry),
             "bib_xt": r.get("bib_int"),
             "time_ms": r.get("time_ms"),
             "pen": r.get("pen") or 0,
@@ -384,7 +445,7 @@ def collect_xt_data(participants: list[dict], results: dict, class_id: str, day:
     return rows
 
 
-def collect_xer_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = ""):
+def collect_xer_data(participants: list[dict], results: dict, class_id: str, day: str, attr: str = "", registry: dict | None = None):
     """Pro F sheet — XER (Event Result, eliminace) má všechno potřebné:
 
     - `Bib`: pro finalisty číslo (XS bib), pro ne-finalisty 't 4' formát
@@ -401,7 +462,7 @@ def collect_xer_data(participants: list[dict], results: dict, class_id: str, day
         if not r:
             continue
         rows.append({
-            **_participant_info(p),
+            **_participant_info(p, registry),
             "bib_raw": r.get("bib_raw"),
             "bib_int": r.get("bib_int"),
             "time_ms": r.get("time_ms"),
@@ -548,20 +609,26 @@ def fill_f_sheet(sheet: Table, xer_rows: list[dict], junior_icfs: set) -> int:
             break
         row = rows[row_idx]
         _clear_data_row(row)
-        is_dns = x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
         # Byl v pavoukovi (F nebo SF, případně QF, …) — Canoe123 to indikuje
         # tím, že Bib v XER je číslo (XS bib), ne 't N' řetězec. Spolehlivější
         # než RecordType (Canoe123 má F/SF/QF/… podle hloubky pavouka).
         in_bracket = x["bib_int"] is not None and not x["bib_raw"].startswith("t")
+        # DNS/DNF "mimo pavouk" (závodník nezačal nebo nedokončil XT) je bez
+        # pořadí. Pavoukoví závodníci s DNF/DSQ na pavoukovi si pořadí
+        # zachovají (XER Rnk = jejich finální místo).
+        is_dns_no_rank = (not in_bracket) and (
+            x["status"] in ("DNS", "DNF", "DSQ") or x["rnk"] is None
+        )
 
-        _set_por(row, None if is_dns else x["rnk"])
+        _set_por(row, None if is_dns_no_rank else x["rnk"])
         _set_jun_marker(row, x["icf"] in junior_icfs)
         if in_bracket:
             _set_bib(row, bib_int=x["bib_int"])
-            _set_final_rank(row, x["rnk"])
+            if x["rnk"] is not None:
+                _set_final_rank(row, x["rnk"])
         else:
             _set_bib(row, bib_raw=x["bib_raw"])
-            if is_dns:
+            if is_dns_no_rank:
                 set_cell_string(get_cell_at(row, COL_TIME_Q), x["status"] or "DNS")
             elif x["time_ms"]:
                 set_cell_float(get_cell_at(row, COL_TIME_Q), x["time_ms"] / 1000.0)
@@ -632,6 +699,12 @@ def main():
 
     update_param(doc, args.race, args.date, args.name)
 
+    # Načti registr (`reg` sheet) — pro lookup zkratky oddílu.
+    # Cross šablona ho nemusí mít (např. Troja jen vyplnila plain text).
+    registry = load_registry(doc)
+    if registry:
+        print(f"  registr: {len(registry)} osob")
+
     day = args.day
     day_final = args.day_final or day
 
@@ -653,12 +726,12 @@ def main():
             continue
 
         if sheet_q is not None:
-            xt_rows = collect_xt_data(parts, results, cls, day, attr)
+            xt_rows = collect_xt_data(parts, results, cls, day, attr, registry)
             n = fill_q_sheet(sheet_q, xt_rows, junior_icfs)
             print(f"  {cls} → {sheet_q.getAttribute('name')}: {n} řádků v kvalifikaci")
 
         if sheet_f is not None:
-            xer_rows = collect_xer_data(parts, results, cls, day_final, attr)
+            xer_rows = collect_xer_data(parts, results, cls, day_final, attr, registry)
             n = fill_f_sheet(sheet_f, xer_rows, junior_icfs)
             print(f"  {cls} → {sheet_f.getAttribute('name')}: {n} řádků v eliminaci")
 
