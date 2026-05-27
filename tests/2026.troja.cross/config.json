@@ -1,0 +1,35 @@
+{
+  "name": "ČP3 Troja 2026 — kajak-kros",
+  "description": "Cross sprint závod, 26.04.26. Senior MX1/WX1 + Junior MX1J/WX1J.",
+  "kind": "cross",
+  "runs": [
+    {
+      "id": "troja",
+      "args": {
+        "day": "26",
+        "date": "26.04.26"
+      },
+      "manual_reference": "manual_reference/CP3_kajak-kros.ods",
+      "known_differences": [
+        {
+          "sheet": "MX1-F",
+          "type": "value_diff",
+          "key": 8,
+          "field": "final_rank",
+          "script": 6,
+          "manual": 5,
+          "note": "PANZER Martin (RGC 39033) — XML říká Rnk=6, ručně zapsáno 5 (sdílí 5. místo s RUDORFEREM). XML nemá remízu."
+        },
+        {
+          "sheet": "MX1-F-JUN",
+          "type": "value_diff",
+          "key": 4,
+          "field": "final_rank",
+          "script": 6,
+          "manual": 5,
+          "note": "LANGER Filip (RGC 9071) — XML říká Rnk=6, ručně zapsáno 5 (sdílí 5. místo s UHLÍKEM)."
+        }
+      ]
+    }
+  ]
+}

@@ -26,7 +26,8 @@ from pathlib import Path
 
 THIS_DIR = Path(__file__).parent
 ROOT = THIS_DIR.parent
-SCRIPT = ROOT / "canoe2eskymo.py"
+SCRIPT_SLALOM = ROOT / "canoe2eskymo.py"
+SCRIPT_CROSS = ROOT / "cross.py"
 
 sys.path.insert(0, str(THIS_DIR))
 import compare  # noqa: E402
@@ -49,12 +50,13 @@ def discover_fixtures(filter_name: str | None = None) -> list[Path]:
     return out
 
 
-def run_script(fixture: Path, run: dict, output: Path) -> subprocess.CompletedProcess:
+def run_script(fixture: Path, run: dict, output: Path, kind: str) -> subprocess.CompletedProcess:
     xml = fixture / "canoe123.xml"
     empty = fixture / "empty.ods"
+    script = SCRIPT_CROSS if kind == "cross" else SCRIPT_SLALOM
     args = run["args"]
     cmd = [
-        sys.executable, str(SCRIPT), str(xml), str(empty), str(output),
+        sys.executable, str(script), str(xml), str(empty), str(output),
         "--day", str(args["day"]),
     ]
     if "race" in args:
@@ -63,6 +65,8 @@ def run_script(fixture: Path, run: dict, output: Path) -> subprocess.CompletedPr
         cmd += ["--date", str(args["date"])]
     if "name" in args:
         cmd += ["--name", str(args["name"])]
+    if "day_final" in args:
+        cmd += ["--day-final", str(args["day_final"])]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
 
 
@@ -95,14 +99,16 @@ def classify_diffs(diffs: list[dict], known: list[dict]) -> tuple[list, list]:
 def run_fixture(fixture: Path, verbose: bool) -> dict:
     """Vrátí dict {ok, runs: [{id, status, …}]}."""
     config = json.loads((fixture / "config.json").read_text(encoding="utf-8"))
-    fixture_result = {"ok": True, "name": config.get("name", fixture.name), "runs": []}
+    kind = config.get("kind", "slalom")
+    fixture_result = {"ok": True, "name": config.get("name", fixture.name),
+                      "kind": kind, "runs": []}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         for run in config.get("runs", []):
             run_id = run["id"]
             output = td_path / f"{run_id}.ods"
-            proc = run_script(fixture, run, output)
+            proc = run_script(fixture, run, output, kind)
             run_result = {"id": run_id, "status": "?", "stdout": proc.stdout,
                           "stderr": proc.stderr, "unexpected": [], "known_matched": []}
 
@@ -123,7 +129,7 @@ def run_fixture(fixture: Path, verbose: bool) -> dict:
                 fixture_result["runs"].append(run_result)
                 continue
 
-            diffs = compare.compare_files(str(output), str(ref))
+            diffs = compare.compare_files(str(output), str(ref), kind=kind)
             known = run.get("known_differences", [])
             matched, unexpected = classify_diffs(diffs, known)
 
@@ -191,8 +197,11 @@ def main():
         print(f"Žádné fixtures k testování v {target}", file=sys.stderr)
         sys.exit(2)
 
-    if not SCRIPT.exists():
-        print(f"canoe2eskymo.py nenalezen na {SCRIPT}", file=sys.stderr)
+    if not SCRIPT_SLALOM.exists():
+        print(f"canoe2eskymo.py nenalezen na {SCRIPT_SLALOM}", file=sys.stderr)
+        sys.exit(2)
+    if not SCRIPT_CROSS.exists():
+        print(f"cross.py nenalezen na {SCRIPT_CROSS}", file=sys.stderr)
         sys.exit(2)
 
     print(f"Spouštím {len(fixtures)} fixture(s):")

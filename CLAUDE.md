@@ -6,10 +6,17 @@ invarianty a vědět, jak ověřit, že úprava neporušila chování.
 
 ## Co repo dělá
 
-Skript [`canoe2eskymo.py`](canoe2eskymo.py) bere XML export ze závodního
-systému **Canoe123** a vyplňuje prázdnou **Eskymo** šablonu (`.ods`)
-— startovku a výsledky obou kol — pro slalom kategorie C1/K1/C2/PZ.
-Body si pak Eskymo dopočítá samo.
+Dva samostatné skripty:
+
+- [`canoe2eskymo.py`](canoe2eskymo.py) — **slalom** (C1/K1/C2/PZ).
+  Vyplní startovku a výsledky obou kol z Canoe123 XML do Eskymo ODS šablony.
+- [`cross.py`](cross.py) — **kajak-kros / cross sprint** (MX1/WX1/MX1J/WX1J,
+  X1M-ZS/ZM, X1Z-ZS/ZM). Vyplní kvalifikaci (XT) a finálovou tabulku
+  (XS + XER) do cross Eskymo šablony.
+
+Body si pak Eskymo dopočítá samo. Skripty jsou oddělené záměrně —
+slalom a cross mají rozdílné race ID formáty, výsledkové struktury
+i ODS layouty.
 
 ## Důležitá doména
 
@@ -133,7 +140,9 @@ Pokud projde, jsi v pohodě. Pokud regrese:
 
 Detaily v [`tests/README.md`](tests/README.md).
 
-## Test fixtures (současně 4)
+## Test fixtures (současně 5)
+
+**Slalom (4):**
 
 1. `tests/2026.cb/` — ČPŽ ČB, kompletní 1.7.1 šablona, bez deblů ani PZ
    v šabloně. Test, že skript správně **přeskočí** chybějící sheety.
@@ -145,6 +154,12 @@ Detaily v [`tests/README.md`](tests/README.md).
 4. `tests/2026.opava/` — ČPŽ Opava, jen C1/K1, **bez** PZ ani C2*.
    Test, že skript nehlásí absurdní warningy, když XML má víc tříd než
    šablona.
+
+**Cross (1):**
+
+5. `tests/2026.troja.cross/` — ČP3 Troja, kajak-kros. Senior MX1/WX1
+   + Junior MX1J/WX1J s 'jun.' markerem v MX1-F. Test pro `cross.py`.
+   `config.json` má `"kind": "cross"`.
 
 ## Časté úkoly
 

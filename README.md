@@ -148,7 +148,30 @@ Striktně podle `<Results>`:
 - **Startovní časy** (sloupce I/J v `*_sl`) — neplní.
 - **Nevytváří chybějící sheety** — pokud šablona nemá `pzk_sl`, PZK
   účastníci se přeskočí a skript to zaloguje.
-- **Nepodporuje cross sprint** (X1M-ZM_XT_...) — viz [`experiments/cross/`](experiments/cross/).
+
+## Cross sprint — samostatný skript
+
+Pro **kajak-kros / cross sprint** je samostatný skript
+[`cross.py`](cross.py). Cross má jiný formát závodu (kvalifikace XT
++ pavouk XS/XF) a jiné Eskymo sheety — proto je oddělený, ať není
+slalom skript zbytečně komplikovaný.
+
+```bash
+python cross.py <xml> <empty_cross.ods> <output.ods> --day 26
+```
+
+Cross skript vyplní v šabloně pro každou cross kategorii
+(MX1, WX1, MX1J, WX1J, X1M-ZS, X1Z-ZM, …):
+
+- **Q sheet** (`<class>-Q` / `<class>-indiv.`): kvalifikace seřazená
+  podle XT času. Junioři v dospělé kategorii dostanou marker `jun.`.
+- **F sheet** (`<class>-F` / `<class>-F-JUN`): kombinace pavouka
+  a kvalifikace.
+  - Top finalisté (z XER) seřazení s bib v semifinále.
+  - Ne-finalisté seřazení podle XT času, bib jako `t {XT_bib}`.
+  - DNS na konci.
+
+Test fixture: [`tests/2026.troja.cross/`](tests/2026.troja.cross/).
 
 ## Otevření a kontrola výstupu
 

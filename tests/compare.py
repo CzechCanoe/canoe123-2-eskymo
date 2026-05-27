@@ -140,10 +140,19 @@ def _diff_dict(script, manual, sheet, fields):
     return diffs
 
 
-def compare_files(script_path: str, manual_path: str) -> list[dict]:
-    """Vrátí list diff záznamů. Prázdný = shoda."""
+def compare_files(script_path: str, manual_path: str, kind: str = "slalom") -> list[dict]:
+    """Vrátí list diff záznamů. Prázdný = shoda.
+
+    kind = 'slalom' (default) nebo 'cross'.
+    """
     script_doc = load(script_path)
     manual_doc = load(manual_path)
+    if kind == "cross":
+        return _compare_cross(script_doc, manual_doc)
+    return _compare_slalom(script_doc, manual_doc)
+
+
+def _compare_slalom(script_doc, manual_doc) -> list[dict]:
     all_diffs: list[dict] = []
     for cls in CLASSES:
         sl_name = cls + "_sl"
@@ -168,6 +177,81 @@ def compare_files(script_path: str, manual_path: str) -> list[dict]:
     return all_diffs
 
 
+# -------- cross sheets --------
+
+CROSS_Q_SUFFIXES = ("-Q", "-indiv.", "-indiv")
+CROSS_F_SUFFIXES = ("-F", "-F-JUN")
+# Cross sheet layout (z výzkumu CP3 manual outputs)
+CROSS_COL_BIB = 3
+CROSS_COL_RGC = 4
+CROSS_COL_TIME_Q = 11
+CROSS_COL_FINAL_RANK = 13
+
+
+def _cross_sheet_kind(name: str) -> str | None:
+    """Vrátí 'Q' nebo 'F' pokud sheet vypadá jako cross, jinak None."""
+    for s in CROSS_F_SUFFIXES:
+        if name.endswith(s):
+            return "F"
+    for s in CROSS_Q_SUFFIXES:
+        if name.endswith(s):
+            return "Q"
+    return None
+
+
+def _read_cross_sheet(doc, name: str, kind: str):
+    """Vrátí dict bib → {rgc, time/final_rank}."""
+    sheet = _get_sheet(doc, name)
+    if sheet is None:
+        return None
+    value_col = CROSS_COL_TIME_Q if kind == "Q" else CROSS_COL_FINAL_RANK
+    value_key = "time" if kind == "Q" else "final_rank"
+    out = {}
+    for row in list(sheet.getElementsByType(TableRow))[2:]:
+        c = _cells_in_row(row)
+        max_needed = max(CROSS_COL_BIB, CROSS_COL_RGC, value_col)
+        if len(c) <= max_needed:
+            continue
+        bib = _cell_value(c[CROSS_COL_BIB])
+        rgc = _cell_value(c[CROSS_COL_RGC])
+        val = _cell_value(c[value_col])
+        bib_n = _norm(bib)
+        if bib_n is None:
+            continue
+        if bib_n in out:
+            continue  # první nález vítězí
+        out[bib_n] = {
+            "rgc": _norm_rgc(rgc),
+            value_key: _norm(val),
+        }
+    return out
+
+
+def _compare_cross(script_doc, manual_doc) -> list[dict]:
+    """Porovná cross sheety. Iteruje přes sheety v obou souborech."""
+    all_diffs: list[dict] = []
+    script_names = {t.getAttribute("name") for t in script_doc.spreadsheet.getElementsByType(Table)}
+    manual_names = {t.getAttribute("name") for t in manual_doc.spreadsheet.getElementsByType(Table)}
+    names = sorted(script_names | manual_names)
+    for name in names:
+        kind = _cross_sheet_kind(name)
+        if kind is None:
+            continue
+        script_data = _read_cross_sheet(script_doc, name, kind) if name in script_names else None
+        manual_data = _read_cross_sheet(manual_doc, name, kind) if name in manual_names else None
+        if script_data is None and manual_data is None:
+            continue
+        if script_data is None or manual_data is None:
+            all_diffs.append({
+                "sheet": name, "type": "sheet_existence",
+                "script": script_data is not None, "manual": manual_data is not None,
+            })
+            continue
+        fields = ["rgc", "time"] if kind == "Q" else ["rgc", "final_rank"]
+        all_diffs.extend(_diff_dict(script_data, manual_data, name, fields))
+    return all_diffs
+
+
 def format_diff(d: dict) -> str:
     if d["type"] == "value_diff":
         return (f"[{d['sheet']}] bib {d['key']} {d['field']}: "
@@ -181,10 +265,11 @@ def format_diff(d: dict) -> str:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: compare.py <script_output.ods> <manual_reference.ods>")
+        print("Usage: compare.py <script_output.ods> <manual_reference.ods> [slalom|cross]")
         sys.exit(2)
+    kind = sys.argv[3] if len(sys.argv) > 3 else "slalom"
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    diffs = compare_files(sys.argv[1], sys.argv[2])
+    diffs = compare_files(sys.argv[1], sys.argv[2], kind=kind)
     if not diffs:
         print("OK: žádné rozdíly")
         return
