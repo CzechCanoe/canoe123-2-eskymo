@@ -68,6 +68,7 @@ i ODS layouty.
 | `lookup_person()` | Name lookup s disambiguací podle roku |
 | `split_double_icf()` | Fallback pro starý XML formát "slepený" ICFId |
 | `add_foreigner()` | Generuje nové A* RGC, zapisuje do `new_cizi_entries` |
+| `_register_known_foreigner()` | Cizinec s existujícím (ne vygenerovaným) A-kódem z Canoe123, chybí v `cizi` — přidá ho se zachováním RGC |
 | `fill_startlist()` | Zápis do `*_sl` sheetu |
 | `fill_results()` | Zápis časů do hlavního sheetu |
 | `_write_run()` | Logika pro jednu jízdu (čas / DNS) |
@@ -112,6 +113,24 @@ třídu `fill_startlist()` + `fill_results()` → `write_cizi_entries()` → sav
    `Söhnall Linda`, v `cizi` `Söhnall Linde` — překlep. Skript je
    nepárová a přidá Lindu jako nové A* RGC. Lidská kontrola pak musí
    posoudit, jestli sloučit.
+
+8. **Diakritický překlep mezi XML a `reg`**: viděno na Letní 2026 ČB —
+   XML psalo `MRÚZEK` (Ú), `reg` má `MRŮZEK` (Ů). `lookup_person()` má
+   fallback bez diakritiky (`_strip_diacritics`, NFKD rozklad), takže
+   se tohle už dohledá. Bez fallbacku skript vygeneroval falešné nové
+   A-RGC pro Čecha, který v `reg` reálně je.
+
+9. **Cizinecký ICFId s "A" prefixem, glued i sólo**: cizinci občas mají
+   v XML vlastní ne-číselný ICFId přímo z Canoe123 (ne vygenerovaný
+   tímhle skriptem), např. `A00404`. Dvě věci, na které si dát pozor:
+   - **Sólo**: takový cizinec se musí přidat do `cizi`, pokud tam
+     chybí — jinak Eskymo VLOOKUP nedohledá jméno/oddíl. Řeší
+     `_register_known_foreigner()`.
+   - **Deble, starý slepený formát**: alfa-prefixovaný ICFId může být
+     slepenec cizinec+Čech (`A90089076` = `A9008` + `9076`). Split
+     musí proběhnout před tím, než `_resolve_paddler()` stihne vzít
+     celý slepenec jako "hotové" RGC1 — proto `_resolve_rgc()` zkouší
+     `split_double_icf()` jako první krok, ne až jako fallback.
 
 ## Sheety v Eskymo šabloně, kterým rozumíme
 
