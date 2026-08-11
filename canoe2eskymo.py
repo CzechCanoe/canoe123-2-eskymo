@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import re
+import unicodedata
 from collections import defaultdict
 from xml.etree import ElementTree as ET
 
@@ -217,15 +218,34 @@ def _cell_text(cell: TableCell) -> str:
     return teletype.extractText(cell)
 
 
+def _strip_diacritics(s: str) -> str:
+    """Odstraní diakritiku (NFKD rozklad + odfiltrování combining znaků).
+
+    Použito jako fallback při lookupu jmen — Canoe123 export občas obsahuje
+    překlep v diakritice (např. 'MRÚZEK' místo 'MRŮZEK' v `reg`), který by
+    jinak přesný lookup shodil na "cizinec, který v cizi chybí".
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    )
+
+
 def load_registry(doc) -> dict:
     """Načte `reg` a `cizi` sheety.
 
     Vrací dict s:
       - 'rgcs': set všech Czech RGC (jako string)
       - 'by_name': (FAMILY_UPPER, GIVEN_UPPER) → list of (rgc, year_str)
+      - 'by_name_normalized': totéž, ale bez diakritiky — fallback při
+        lookupu, když se přesné jméno nenajde (viz `_strip_diacritics`)
       - 'foreign_by_fullname': FULLNAME_UPPER → "A…" RGC (cizi)
     """
-    out = {"rgcs": set(), "by_name": defaultdict(list), "foreign_by_fullname": {}}
+    out = {
+        "rgcs": set(),
+        "by_name": defaultdict(list),
+        "by_name_normalized": defaultdict(list),
+        "foreign_by_fullname": {},
+    }
     sheet = get_sheet(doc, "reg")
     if sheet is not None:
         rows = list(sheet.getElementsByType(TableRow))
@@ -242,6 +262,9 @@ def load_registry(doc) -> dict:
             out["rgcs"].add(rgc)
             if family and given:
                 out["by_name"][(family, given)].append((rgc, year))
+                out["by_name_normalized"][
+                    (_strip_diacritics(family), _strip_diacritics(given))
+                ].append((rgc, year))
     cizi = get_sheet(doc, "cizi")
     if cizi is not None:
         rows = list(cizi.getElementsByType(TableRow))
@@ -262,6 +285,12 @@ def lookup_person(family: str, given: str, year: str, registry: dict) -> str | N
     giv = (given or "").strip().upper()
     if fam and giv:
         candidates = registry["by_name"].get((fam, giv), [])
+        if not candidates:
+            # Fallback: jméno se přesně nenašlo — zkusit bez diakritiky
+            # (typický Canoe123 quirk: 'MRÚZEK' v XML vs. 'MRŮZEK' v reg).
+            candidates = registry["by_name_normalized"].get(
+                (_strip_diacritics(fam), _strip_diacritics(giv)), []
+            )
         if candidates:
             if year and len(candidates) > 1:
                 for rgc, ry in candidates:
@@ -437,17 +466,22 @@ def _resolve_rgc(p: dict, class_id: str, registry: dict,
     club = p.get("club", "")
     if class_id in DOUBLE_CLASSES:
         icf2 = p.get("icf2", "")
-        rgc1 = _resolve_paddler(icf, p["family"], p["given"], p.get("year", ""),
-                                 club, registry, new_cizi_entries)
-        rgc2 = _resolve_paddler(icf2, p["family2"], p["given2"], p.get("year2", ""),
-                                 club, registry, new_cizi_entries)
-        if (not rgc1 or not rgc2) and icf and not icf2:
+        rgc1 = rgc2 = None
+        # Starý slepený formát (icf2 prázdné): `icf` je typicky RGC1+RGC2
+        # zřetězené jako jeden string — zkusit rozdělit DŘÍV, než se
+        # zavolá _resolve_paddler (ten má vedlejší účinky — add_foreigner /
+        # zápis do cizi — a jeho branch pro ne-číselné ICFId by jinak vzal
+        # celý slepenec jako hotové RGC1, viz split_double_icf).
+        if icf and not icf2:
             split = split_double_icf(icf, p, registry)
             if split:
-                if not rgc1:
-                    rgc1 = split[0]
-                if not rgc2:
-                    rgc2 = split[1]
+                rgc1, rgc2 = split
+        if not rgc1:
+            rgc1 = _resolve_paddler(icf, p["family"], p["given"], p.get("year", ""),
+                                     club, registry, new_cizi_entries)
+        if not rgc2:
+            rgc2 = _resolve_paddler(icf2, p["family2"], p["given2"], p.get("year2", ""),
+                                     club, registry, new_cizi_entries)
         if rgc1 and rgc2:
             return f"{rgc1} {rgc2}"
         missing = []
@@ -479,7 +513,9 @@ def _resolve_paddler(icf: str, family: str, given: str, year: str,
 
     Strategie:
       1) ICFId v `reg` → vrať ho.
-      2) ICFId není číslo (např. "A12345") → vrať ho.
+      2) ICFId není číslo (např. "A12345") → cizinec s vlastním kódem
+         z Canoe123. Pokud v `cizi` chybí, přidej ho tam (se zachováním
+         tohoto RGC — na rozdíl od add_foreigner níže negeneruj nový).
       3) Lookup podle jména v `reg` / `cizi` (+ rok pro disambiguaci).
       4) Pokud pořád nic a jméno máme → cizinec, který v `cizi` chybí;
          vygeneruj nové A* RGC a přidej do `new_cizi_entries`.
@@ -488,6 +524,7 @@ def _resolve_paddler(icf: str, family: str, given: str, year: str,
     if icf and icf in registry["rgcs"]:
         return icf
     if icf and not icf.isdigit():
+        _register_known_foreigner(icf, family, given, club, registry, new_cizi_entries)
         return icf
     rgc = lookup_person(family, given, year, registry)
     if rgc:
@@ -496,6 +533,34 @@ def _resolve_paddler(icf: str, family: str, given: str, year: str,
         # XML nezná ICFId → cizinec, který ještě není v cizi
         return add_foreigner(family, given, club, registry, new_cizi_entries)
     return icf if icf else None
+
+
+def _register_known_foreigner(rgc: str, family: str, given: str, club: str,
+                              registry: dict, new_cizi_entries: list) -> None:
+    """Cizinec, který už má vlastní ICFId přímo z Canoe123 (ne vygenerovaný
+    tímhle skriptem) — pokud v `cizi` chybí, přidej ho tam se zachováním
+    jeho existujícího RGC.
+
+    Bez tohohle by takový cizinec zůstal ve startovce/výsledcích s RGC,
+    na které v `cizi` nic neukazuje — Eskymo VLOOKUP mu pak nedohledá
+    jméno/oddíl (viditelná prázdná buňka v Eskymu, snadno přehlédnutelná).
+    """
+    fam = (family or "").strip()
+    giv = (given or "").strip()
+    fullname = f"{fam} {giv}".strip()
+    if not fullname:
+        return
+    key = fullname.upper()
+    if key in registry["foreign_by_fullname"]:
+        return  # osoba už evidovaná (pod týmž jménem)
+    if rgc in registry["foreign_by_fullname"].values():
+        return  # tohle RGC už v cizi je (pod jiným zápisem jména)
+    registry["foreign_by_fullname"][key] = rgc
+    new_cizi_entries.append({
+        "rgc": rgc,
+        "fullname": fullname,
+        "club": (club or "").strip(),
+    })
 
 
 def fill_results(doc, sheet_name: str, participants: list[dict],
